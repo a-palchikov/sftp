@@ -158,7 +158,6 @@ func (c *Client) recv() {
 	defer close(c.recvClosed)
 	for {
 		typ, data, err := recvPacket(c.r)
-		debug("recv: typ=%v, data.len=%d err=%v\n", typ, len(data), err)
 		if err != nil {
 			// Return the error to all listeners.
 			c.broadcastErr(err)
@@ -173,15 +172,11 @@ func (c *Client) recv() {
 			// This is an unexpected occurrence. Send the error
 			// back to all listeners so that they terminate
 			// gracefully.
-			c.broadcastErr(fmt.Errorf("sid: %v not found", sid))
+			c.broadcastErr(fmt.Errorf("sid: %v not fond", sid))
 			return
 		}
-		debug("recv: sid=%d, ch=%v<-{typ:%v}\n", sid, ch, fxp(typ))
-		ch <- result{typ: typ, data: data} // FIXME: now, no receiver here, and the send blocked
+		ch <- result{typ: typ, data: data}
 	}
-
-	// FIXME: complete/abort the inflight requests and close the channel(s)
-	// to be able to rewrite select{case res=<-ch:} to for res := range ch {...}
 }
 
 // Walk returns a new Walker rooted at root.
@@ -664,26 +659,19 @@ type idmarshaler interface {
 
 func (c *Client) sendRequest(p idmarshaler) (byte, []byte, error) {
 	ch := make(chan result, 1)
-
-	if err := c.dispatchRequest(ch, p); err != nil {
-		close(ch)
-		return 0, nil, err
-	}
-
+	c.dispatchRequest(ch, p)
 	s := <-ch
-	close(ch)
 	return s.typ, s.data, s.err
 }
 
-func (c *Client) dispatchRequest(ch chan<- result, p idmarshaler) error {
+func (c *Client) dispatchRequest(ch chan<- result, p idmarshaler) {
 	c.mu.Lock()
-	if err := sendPacket(c.w, p); err != nil {
-		c.mu.Unlock()
-		return err
-	}
 	c.inflight[p.id()] = ch
+	if err := sendPacket(c.w, p); err != nil {
+		delete(c.inflight, p.id())
+		ch <- result{err: err}
+	}
 	c.mu.Unlock()
-	return nil
 }
 
 // Mkdir creates the specified directory. An error will be returned if a file or
@@ -861,34 +849,26 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 	}
 	var firstErr offsetErr
 
-	sendReq := func(b []byte, offset uint64) error {
-		reqId := f.c.nextId()
-
-		if err := f.c.dispatchRequest(ch, sshFxpReadPacket{
-			Id:     reqId,
+	sendReq := func(b []byte, offset uint64) {
+		reqID := f.c.nextID()
+		f.c.dispatchRequest(ch, sshFxpReadPacket{
+			ID:     reqID,
 			Handle: f.handle,
 			Offset: offset,
 			Len:    uint32(len(b)),
-		}); err != nil {
-			return err
-		} else {
-			inFlight++
-			reqs[reqId] = inflightRead{b: b, offset: offset}
-		}
-		return nil
+		})
+		inFlight++
+		reqs[reqID] = inflightRead{b: b, offset: offset}
 	}
 
 	var copied int64
 	for firstErr.err == nil || inFlight > 0 {
 		for inFlight < desiredInFlight && firstErr.err == nil {
 			b := make([]byte, f.c.maxPacket)
-			// Stop making requests upon the first error.
-			// Note, that in order to make progress, all previous requests need to be processed
-			if firstErr.err = sendReq(b, offset); firstErr.err == nil {
-				offset += uint64(f.c.maxPacket)
-				if offset > fileSize {
-					desiredInFlight = 1
-				}
+			sendReq(b, offset)
+			offset += uint64(f.c.maxPacket)
+			if offset > fileSize {
+				desiredInFlight = 1
 			}
 		}
 
@@ -908,8 +888,7 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 				firstErr = offsetErr{offset: 0, err: fmt.Errorf("sid: %v not found", reqID)}
 				break
 			}
-
-			delete(reqs, reqId) // FIXME: dont delete, use it to clean up c.inflight
+			delete(reqs, reqID)
 			switch res.typ {
 			case ssh_FXP_STATUS:
 				if firstErr.err == nil || req.offset < firstErr.offset {
@@ -963,8 +942,7 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 			}
 		}
 	}
-
-	if firstErr.err != io.EOF || writeOffset < fileSize {
+	if firstErr.err != io.EOF {
 		return copied, firstErr.err
 	}
 	return copied, nil
