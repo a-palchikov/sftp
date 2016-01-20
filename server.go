@@ -16,16 +16,7 @@ import (
 )
 
 const (
-	// Values greater than one conflict with the spec:
-	// http://tools.ietf.org/html/draft-ietf-secsh-filexfer-02
-	// Section 6.1 Request Synchronization and Reordering:
-	//
-	// "The protocol and implementations MUST process requests relating to
-	// the same file in the order in which they are received.  In other
-	// words, if an application submits multiple requests to the server, the
-	// results in the responses will be the same as if it had sent the
-	// requests one at a time and waited for the response in each case."
-	sftpServerWorkerCount = 1 // FIXME
+	sftpServerWorkerCount = 8
 )
 
 // Server is an SSH File Transfer Protocol (sftp) server.
@@ -144,7 +135,7 @@ func (svr *Server) rxPackets() error {
 		case io.EOF:
 			return nil
 		default:
-			svr.debug("recvPacket error: %v\n", err)
+			fmt.Fprintf(svr.debugStream, "recvPacket error: %v\n", err)
 			return err
 		}
 	}
@@ -155,7 +146,7 @@ func (svr *Server) sftpServerWorker(doneChan chan error) {
 	for pkt := range svr.pktChan {
 		dPkt, err := svr.decodePacket(pkt.pktType, pkt.pktBytes)
 		if err != nil {
-			svr.debug("decodePacket error: %v\n", err)
+			fmt.Fprintf(svr.debugStream, "decodePacket error: %v\n", err)
 			doneChan <- err
 			return
 		}
@@ -188,7 +179,7 @@ func (svr *Server) Serve() error {
 	}
 	// close any still-open files
 	for handle, file := range svr.openFiles {
-		svr.debug("sftp server file with handle '%v' left open: %v\n", handle, file.Name())
+		fmt.Fprintf(svr.debugStream, "sftp server file with handle '%v' left open: %v\n", handle, file.Name())
 		file.Close()
 	}
 	return svr.out.Close()
@@ -240,11 +231,6 @@ func (svr *Server) decodePacket(pktType fxp, pktBytes []byte) (serverRespondable
 	}
 	err := pkt.UnmarshalBinary(pktBytes)
 	return pkt, err
-}
-
-func (svr *Server) debug(format string, args ...interface{}) {
-	fmt.Fprintf(svr.debugStream, format, args...)
-	fmt.Fprint(svr.debugStream, "\n")
 }
 
 func (p sshFxInitPacket) respond(svr *Server) error {
@@ -480,8 +466,6 @@ func (p sshFxpReadPacket) respond(svr *Server) error {
 	}
 
 	ret.Length = uint32(n)
-	ret.Data = ret.Data[:ret.Length]
-
 	return svr.sendPacket(ret)
 }
 
