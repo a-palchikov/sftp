@@ -33,18 +33,19 @@ const (
 // This implementation currently supports most of sftp server protocol version 3,
 // as specified at http://tools.ietf.org/html/draft-ietf-secsh-filexfer-02
 type Server struct {
-	in            io.Reader
-	out           io.WriteCloser
-	outMutex      *sync.Mutex
-	debugStream   io.Writer
-	readOnly      bool
-	lastID        uint32
-	pktChan       chan rxPacket
-	openFiles     map[string]*os.File
-	openFilesLock *sync.RWMutex
-	handleCount   int
-	maxTxPacket   uint32
-	workerCount   int
+	in               io.Reader
+	out              io.WriteCloser
+	outMutex         *sync.Mutex
+	debugStream      io.Writer
+	readOnly         bool
+	lastID           uint32
+	pktChan          chan rxPacket
+	openFiles        map[string]*os.File
+	openFilesLock    *sync.RWMutex
+	handleCount      int
+	maxTxPacket      uint32
+	workerCount      int
+	contentDirectory string
 }
 
 func (svr *Server) nextHandle(f *os.File) string {
@@ -123,6 +124,16 @@ func WithDebug(w io.Writer) ServerOption {
 func ReadOnly() ServerOption {
 	return func(s *Server) error {
 		s.readOnly = true
+		return nil
+	}
+}
+
+// WithContentDirectory configures a directory server will serve content from.
+// Setting the content directory offers a chroot-similar functionality when file access
+// is restricted to the specified directory.
+func WithContentDirectory(path string) ServerOption {
+	return func(s *Server) error {
+		s.contentDirectory = path
 		return nil
 	}
 }
@@ -375,12 +386,7 @@ func (p sshFxpReadlinkPacket) respond(svr *Server) error {
 func (p sshFxpRealpathPacket) readonly() bool { return true }
 
 func (p sshFxpRealpathPacket) respond(svr *Server) error {
-	f, err := filepath.Abs(p.Path)
-	if err != nil {
-		return svr.sendPacket(statusFromError(p.ID, err))
-	}
-
-	f = filepath.Clean(f)
+	f := filepath.Clean(p.Path)
 
 	return svr.sendPacket(sshFxpNamePacket{
 		ID: p.ID,
@@ -442,13 +448,19 @@ func (p sshFxpOpenPacket) respond(svr *Server) error {
 		osFlags |= os.O_EXCL
 	}
 
-	f, err := os.OpenFile(p.Path, osFlags, 0644)
+	path := svr.contentalize(p.Path)
+
+	f, err := os.OpenFile(path, osFlags, 0644)
 	if err != nil {
 		return svr.sendPacket(statusFromError(p.ID, err))
 	}
 
 	handle := svr.nextHandle(f)
 	return svr.sendPacket(sshFxpHandlePacket{p.ID, handle})
+}
+
+func (svr *Server) contentalize(path string) string {
+	return filepath.Join(svr.contentDirectory, filepath.Join("/", filepath.Clean(path)))
 }
 
 func (p sshFxpClosePacket) readonly() bool { return true }
