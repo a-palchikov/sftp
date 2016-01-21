@@ -33,19 +33,19 @@ const (
 // This implementation currently supports most of sftp server protocol version 3,
 // as specified at http://tools.ietf.org/html/draft-ietf-secsh-filexfer-02
 type Server struct {
-	in               io.Reader
-	out              io.WriteCloser
-	outMutex         *sync.Mutex
-	debugStream      io.Writer
-	readOnly         bool
-	lastID           uint32
-	pktChan          chan rxPacket
-	openFiles        map[string]*os.File
-	openFilesLock    *sync.RWMutex
-	handleCount      int
-	maxTxPacket      uint32
-	workerCount      int
-	contentDirectory string
+	in            io.Reader
+	out           io.WriteCloser
+	outMutex      *sync.Mutex
+	debugStream   io.Writer
+	readOnly      bool
+	lastID        uint32
+	pktChan       chan rxPacket
+	openFiles     map[string]*os.File
+	openFilesLock *sync.RWMutex
+	handleCount   int
+	maxTxPacket   uint32
+	workerCount   int
+	rootDir       string
 }
 
 func (svr *Server) nextHandle(f *os.File) string {
@@ -128,12 +128,12 @@ func ReadOnly() ServerOption {
 	}
 }
 
-// WithContentDirectory configures a directory server will serve content from.
-// Setting the content directory offers a chroot-similar functionality when file access
-// is restricted to the specified directory.
-func WithContentDirectory(path string) ServerOption {
+// WithRootDir configures a new location to be used as a root for file access.
+// Setting root directory to an empty path results in unrestricted file
+// access, when client works with absolute paths.
+func WithRootDir(rootDir string) ServerOption {
 	return func(s *Server) error {
-		s.contentDirectory = path
+		s.rootDir = rootDir
 		return nil
 	}
 }
@@ -448,7 +448,10 @@ func (p sshFxpOpenPacket) respond(svr *Server) error {
 		osFlags |= os.O_EXCL
 	}
 
-	path := svr.contentalize(p.Path)
+	path, err := svr.buildPath(p.Path)
+	if err != nil {
+		return svr.sendPacket(statusFromError(p.ID, err))
+	}
 
 	f, err := os.OpenFile(path, osFlags, 0644)
 	if err != nil {
@@ -459,8 +462,20 @@ func (p sshFxpOpenPacket) respond(svr *Server) error {
 	return svr.sendPacket(sshFxpHandlePacket{p.ID, handle})
 }
 
-func (svr *Server) contentalize(path string) string {
-	return filepath.Join(svr.contentDirectory, filepath.Join("/", filepath.Clean(path)))
+func (svr *Server) buildPath(path string) (string, error) {
+	return buildPath(svr.rootDir, path)
+}
+
+// buildPath combines rootDir with path using the following rules:
+//  - if rootDir is empty, the path is converted an absoulte equivalent
+//  - if rootDir is not empty, the resulting path will never escape outside of
+//    rootDir.  The operation removes all indirect references outside of rootDir
+//    so that the resulting path might not be equivalent to a filepath.Join.
+func buildPath(rootDir, path string) (string, error) {
+	if rootDir != "" {
+		return filepath.Join(rootDir, filepath.Join("/", filepath.Clean(path))), nil
+	}
+	return filepath.Abs(path)
 }
 
 func (p sshFxpClosePacket) readonly() bool { return true }
